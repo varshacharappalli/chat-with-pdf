@@ -7,8 +7,6 @@ from dotenv import load_dotenv
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
-from faiss import IndexFlatL2
-
 
 app = FastAPI()
 
@@ -18,9 +16,7 @@ api_key = os.getenv('API_KEY')
 
 embedding_function = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
-index = IndexFlatL2(384)
-vector_store = FAISS(index, {}, {}, embedding_function)
-
+vector_store = None
 documents = []  
 
 def extract_text_from_pdf(file_path):
@@ -54,18 +50,27 @@ async def upload_pdf(file: UploadFile = File(...), chunk_size: int = 1000, overl
     documents.clear()
     
     chunks_processed = 0
+    all_chunks = []
     
     for page_num, text in enumerate(text_data):
         chunks = split_text_with_langchain(text, chunk_size, overlap)
-        
         for i, chunk in enumerate(chunks):
             chunk_with_metadata = f"Page {page_num + 1}, Chunk {i + 1}: {chunk}"
-            embedding = embedding_function.embed_query(chunk)
-
-            if embedding is not None:
-                vector_store.add_texts([chunk_with_metadata], [np.array(embedding, dtype=np.float32)])
-                documents.append(chunk_with_metadata)
-                chunks_processed += 1
+            all_chunks.append((chunk_with_metadata, {"source": f"Page {page_num + 1}, Chunk {i + 1}"}))
+    
+    if all_chunks:
+        texts = [all_chunks[0][0]]
+        metadatas = [all_chunks[0][1]]
+        vector_store = FAISS.from_texts(texts=texts, metadatas=metadatas, embedding=embedding_function)
+        documents.append(all_chunks[0][0])
+        chunks_processed = 1
+        
+        if len(all_chunks) > 1:
+            texts = [chunk[0] for chunk in all_chunks[1:]]
+            metadatas = [chunk[1] for chunk in all_chunks[1:]]
+            vector_store.add_texts(texts=texts, metadatas=metadatas)
+            documents.extend(texts)
+            chunks_processed += len(texts)
     
     return {
         "message": "PDF uploaded and processed successfully", 
@@ -73,15 +78,64 @@ async def upload_pdf(file: UploadFile = File(...), chunk_size: int = 1000, overl
         "chunks_processed": chunks_processed
     }
 
+def process_pdf(file_path: str, chunk_size: int = 1000, overlap: int = 200):
+    file_ext = file_path.split(".")[-1].lower()
+    if file_ext != "pdf":
+        return {"error": "Only PDF files are supported."}
+    
+    if not os.path.exists(file_path):
+        return {"error": "File does not exist."}
+    
+    text_data = extract_text_from_pdf(file_path)
+    
+    global vector_store, documents
+    documents.clear()
+    
+    chunks_processed = 0
+    all_chunks = []
+    
+    for page_num, text in enumerate(text_data):
+        chunks = split_text_with_langchain(text, chunk_size, overlap)
+        for i, chunk in enumerate(chunks):
+            chunk_with_metadata = f"Page {page_num + 1}, Chunk {i + 1}: {chunk}"
+            all_chunks.append((chunk_with_metadata, {"source": f"Page {page_num + 1}, Chunk {i + 1}"}))
+    
+    if all_chunks:
+        texts = [all_chunks[0][0]]
+        metadatas = [all_chunks[0][1]]
+        vector_store = FAISS.from_texts(texts=texts, metadatas=metadatas, embedding=embedding_function)
+        documents.append(all_chunks[0][0])
+        chunks_processed = 1
+        
+        if len(all_chunks) > 1:
+            texts = [chunk[0] for chunk in all_chunks[1:]]
+            metadatas = [chunk[1] for chunk in all_chunks[1:]]
+            vector_store.add_texts(texts=texts, metadatas=metadatas)
+            documents.extend(texts)
+            chunks_processed += len(texts)
+    
+    return {
+        "message": "PDF processed successfully", 
+        "pages_processed": len(text_data),
+        "chunks_processed": chunks_processed
+    }
+
 @app.get("/chat/")
 async def chat_with_pdf(query: str, top_k: int = 3):
+    global vector_store
+    
+    if vector_store is None:
+        return {"error": "No PDF has been processed yet. Please upload a PDF first."}
+    
     query_embedding = embedding_function.embed_query(query)
     if query_embedding is None:
         return {"error": "Failed to generate embedding for query"}
     
-    distances, nearest_indices = vector_store.similarity_search_with_score(query_embedding, top_k)
+    results = vector_store.similarity_search(query, k=top_k)
     
-    context = "\n\n---\n\n".join([documents[idx] for idx, _ in nearest_indices if idx < len(documents)])
+    context = "\n\n---\n\n".join([doc.page_content for doc in results])
+    
+    sources = [doc.metadata.get("source", "Unknown") for doc in results]
     
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -97,7 +151,11 @@ async def chat_with_pdf(query: str, top_k: int = 3):
     if response.status_code == 200:
         return {
             "response": response.json()["choices"][0]["message"]["content"],
-            "sources": [documents[idx].split(": ", 1)[0] for idx, _ in nearest_indices if idx < len(documents)]
+            "sources": sources
         }
     else:
         return {"error": "Failed to get response from LLM", "details": response.json()}
+
+file_path = r"C:\Users\cvars\Downloads\Unit 3 (2).pdf"
+result = process_pdf(file_path)
+print(result)
