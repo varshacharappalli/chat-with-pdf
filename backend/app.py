@@ -1,69 +1,45 @@
 from fastapi import FastAPI, UploadFile, File
 import numpy as np
-import faiss
 import requests
 import os
 import pymupdf as fitz
 from dotenv import load_dotenv
-import textwrap
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from langchain_huggingface import HuggingFaceEmbeddings
+
 
 app = FastAPI()
 
 load_dotenv()
-print(os.getenv("API_KEY"))
 
 api_key = os.getenv('API_KEY')
-API_TOKEN = os.getenv('API_TOKEN')
 
-dimension = 1536
-index = faiss.IndexFlatL2(dimension)
-documents = []
+embedding_function = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+
+
+vector_store = FAISS(embedding_function)
+
+documents = []  
 
 def extract_text_from_pdf(file_path):
+    """Extract text from a PDF file using PyMuPDF (pymupdf)."""
     text_data = []
     doc = fitz.open(file_path)
     for page in doc:
         text_data.append(page.get_text("text"))
     return text_data
 
-def chunk_text(text, chunk_size=1000, overlap=200):
-    chunks = []
-    if len(text) <= chunk_size:
-        chunks.append(text)
-    else:
-        start = 0
-        while start < len(text):
-            end = min(start + chunk_size, len(text))
-            
-            if end < len(text):
-                look_back = min(100, chunk_size // 4)
-                break_point = text.rfind(". ", end - look_back, end)
-                if break_point == -1:
-                    break_point = text.rfind("\n", end - look_back, end)
-                
-                if break_point != -1:
-                    end = break_point + 1 
-            
-            chunks.append(text[start:end].strip())
-            start = end - overlap if end - overlap > start else start + chunk_size // 2
-    
-    return chunks
-
-def get_embedding(text):
-    url = "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2"
-    headers = {"Authorization": f"Bearer {API_TOKEN}"}
-    data = {"inputs": [text]}
-    
-    response = requests.post(url, headers=headers, json=data)
-    
-    if response.status_code == 200:
-        return response.json()[0]
-    else:
-        print("Error:", response.json())
-        return None
+def split_text_with_langchain(text, chunk_size=1000, overlap=200):
+    """Use Langchain's RecursiveCharacterTextSplitter to split text into chunks."""
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size, chunk_overlap=overlap, separators=["\n\n", "\n", " ", ""]
+    )
+    return text_splitter.split_text(text)
 
 @app.post("/upload/")
 async def upload_pdf(file: UploadFile = File(...), chunk_size: int = 1000, overlap: int = 200):
+    """Handle PDF upload, extract text, split into chunks, and store embeddings in FAISS index."""
     file_ext = file.filename.split(".")[-1].lower()
     if file_ext != "pdf":
         return {"error": "Only PDF files are supported."}
@@ -76,21 +52,20 @@ async def upload_pdf(file: UploadFile = File(...), chunk_size: int = 1000, overl
     
     text_data = extract_text_from_pdf(file_path)
     
-    global index, documents
+    global vector_store, documents
     documents.clear()
-    index.reset()
     
     chunks_processed = 0
     
     for page_num, text in enumerate(text_data):
-        chunks = chunk_text(text, chunk_size, overlap)
+        chunks = split_text_with_langchain(text, chunk_size, overlap)
         
         for i, chunk in enumerate(chunks):
             chunk_with_metadata = f"Page {page_num + 1}, Chunk {i + 1}: {chunk}"
-            
-            embedding = get_embedding(chunk)
+            embedding = embedding_function.embed_query(chunk)
+
             if embedding is not None:
-                index.add(np.array([embedding], dtype=np.float32))
+                vector_store.add_texts([chunk_with_metadata], [np.array(embedding, dtype=np.float32)])
                 documents.append(chunk_with_metadata)
                 chunks_processed += 1
     
@@ -102,13 +77,14 @@ async def upload_pdf(file: UploadFile = File(...), chunk_size: int = 1000, overl
 
 @app.get("/chat/")
 async def chat_with_pdf(query: str, top_k: int = 3):
-    query_embedding = get_embedding(query)
+    """Perform semantic search on indexed PDF embeddings and query an LLM."""
+    query_embedding = embedding_function.embed_query(query)
     if query_embedding is None:
         return {"error": "Failed to generate embedding for query"}
     
-    distances, nearest_indices = index.search(np.array([query_embedding], dtype=np.float32), top_k)
+    distances, nearest_indices = vector_store.similarity_search_with_score(query_embedding, top_k)
     
-    context = "\n\n---\n\n".join([documents[idx] for idx in nearest_indices[0] if idx < len(documents)])
+    context = "\n\n---\n\n".join([documents[idx] for idx, _ in nearest_indices if idx < len(documents)])
     
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -124,7 +100,7 @@ async def chat_with_pdf(query: str, top_k: int = 3):
     if response.status_code == 200:
         return {
             "response": response.json()["choices"][0]["message"]["content"],
-            "sources": [documents[idx].split(": ", 1)[0] for idx in nearest_indices[0] if idx < len(documents)]
+            "sources": [documents[idx].split(": ", 1)[0] for idx, _ in nearest_indices if idx < len(documents)]
         }
     else:
         return {"error": "Failed to get response from LLM", "details": response.json()}
