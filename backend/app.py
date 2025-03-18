@@ -106,10 +106,8 @@ async def chat_with_pdf(query: str, top_k: int = 3):
     if query_embedding is None:
         return {"error": "Failed to generate embedding for query"}
     
-    # Retrieve top_k most relevant chunks
     distances, nearest_indices = index.search(np.array([query_embedding], dtype=np.float32), top_k)
     
-    # Combine the retrieved chunks
     context = "\n\n---\n\n".join([documents[idx] for idx in nearest_indices[0] if idx < len(documents)])
     
     url = "https://openrouter.ai/api/v1/chat/completions"
