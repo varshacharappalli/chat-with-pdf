@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
+from faiss import IndexFlatL2
 
 
 app = FastAPI()
@@ -17,13 +18,12 @@ api_key = os.getenv('API_KEY')
 
 embedding_function = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
-
-vector_store = FAISS(embedding_function)
+index = IndexFlatL2(384)
+vector_store = FAISS(index, {}, {}, embedding_function)
 
 documents = []  
 
 def extract_text_from_pdf(file_path):
-    """Extract text from a PDF file using PyMuPDF (pymupdf)."""
     text_data = []
     doc = fitz.open(file_path)
     for page in doc:
@@ -31,7 +31,6 @@ def extract_text_from_pdf(file_path):
     return text_data
 
 def split_text_with_langchain(text, chunk_size=1000, overlap=200):
-    """Use Langchain's RecursiveCharacterTextSplitter to split text into chunks."""
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size, chunk_overlap=overlap, separators=["\n\n", "\n", " ", ""]
     )
@@ -39,7 +38,6 @@ def split_text_with_langchain(text, chunk_size=1000, overlap=200):
 
 @app.post("/upload/")
 async def upload_pdf(file: UploadFile = File(...), chunk_size: int = 1000, overlap: int = 200):
-    """Handle PDF upload, extract text, split into chunks, and store embeddings in FAISS index."""
     file_ext = file.filename.split(".")[-1].lower()
     if file_ext != "pdf":
         return {"error": "Only PDF files are supported."}
@@ -77,7 +75,6 @@ async def upload_pdf(file: UploadFile = File(...), chunk_size: int = 1000, overl
 
 @app.get("/chat/")
 async def chat_with_pdf(query: str, top_k: int = 3):
-    """Perform semantic search on indexed PDF embeddings and query an LLM."""
     query_embedding = embedding_function.embed_query(query)
     if query_embedding is None:
         return {"error": "Failed to generate embedding for query"}
