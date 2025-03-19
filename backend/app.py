@@ -1,5 +1,6 @@
 from fastapi import FastAPI, UploadFile, File
 import numpy as np
+from fastapi.middleware.cors import CORSMiddleware
 import requests
 import os
 import pymupdf as fitz
@@ -9,6 +10,14 @@ from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],  
+    allow_credentials=True,
+    allow_methods=["*"],  
+    allow_headers=["*"],  
+)
 
 load_dotenv()
 
@@ -156,6 +165,3 @@ async def chat_with_pdf(query: str, top_k: int = 3):
     else:
         return {"error": "Failed to get response from LLM", "details": response.json()}
 
-file_path = r"C:\Users\cvars\Downloads\Unit 3 (2).pdf"
-result = process_pdf(file_path)
-print(result)
