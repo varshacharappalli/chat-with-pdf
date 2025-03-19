@@ -140,7 +140,7 @@ async def chat_with_pdf(query: str, top_k: int = 3):
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     data = {
-        "model": "deepseek-ai/deepseek-chat",
+        "model": "deepseek/deepseek-r1:free",
         "messages": [
             {"role": "system", "content": "You are a helpful assistant. Answer questions based on the provided document context."},
             {"role": "user", "content": f"Use this document context to answer the question:\n\n{context}\n\nQuestion: {query}"}
